@@ -173,10 +173,16 @@ async def upload_videos(files: list[UploadFile] = File(...)):
     temp_paths = []
     try:
         for file in files:
-            filename = file.filename
+            filename = file.filename or ""
             log.info(f"Processing file: {filename}")
-            if not filename.lower().endswith('.mp4'):
-                raise HTTPException(status_code=400, detail=f"Only MP4 files are supported: {filename}")
+            content_type = getattr(file, "content_type", None) or ""
+            is_mp4_by_name = filename.lower().endswith('.mp4')
+            is_mp4_by_type = content_type.lower() == 'video/mp4'
+            if not (is_mp4_by_name or is_mp4_by_type):
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Only MP4 files are supported. Received filename='{filename}', content_type='{content_type}'"
+                )
             video_id = get_next_video_id()
             temp_path = f"temp_{video_id}.mp4"
             temp_paths.append(temp_path)
@@ -197,8 +203,12 @@ async def upload_videos(files: list[UploadFile] = File(...)):
             results.append(video_metadata)
             videos[video_id] = video_metadata
         return JSONResponse(content=results)
+    except HTTPException:
+        # Let HTTPExceptions propagate so their detail/status are preserved
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error processing videos: {str(e)}")
+        log.error(f"Unexpected error processing videos: {e}")
+        raise HTTPException(status_code=400, detail=f"Error processing videos: {e}")
     finally:
         for p in temp_paths:
             if os.path.exists(p):
@@ -277,4 +287,5 @@ async def root():
     }
 
 if __name__ == "__main__":
+
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", access_log=True)
