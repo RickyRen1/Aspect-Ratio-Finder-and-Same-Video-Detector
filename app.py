@@ -68,7 +68,9 @@ def find_ratio_bucket(width, height):
 def dhash_gray(image_gray: np.ndarray) -> int:
     """
     Compute a 64-bit dHash (difference hash) for a grayscale image.
-    This hash is robust to brightness, contrast, and minor variations.
+    :param np.ndarray image_gray: Grayscale image from video upload
+    :return: 64-bit integer hash value representing the image
+    :rtype: int
     """
     # Resize to 9x8 to get 8 rows and 9 columns
     # 9 columns produce 8 comparisons (0 vs 1, 1 vs 2, ..., 7 vs 8).
@@ -89,8 +91,11 @@ def dhash_gray(image_gray: np.ndarray) -> int:
 
 def sample_frame_hashes(file_path: str, max_frames: int = 15) -> List[int]:
     """
-    Sample frames across the video and compute dHashes for perceptual similarity.
-    Returns a list of hash values.
+    Sample frames across the video and compute dHashes for similarity.
+    :param str file_path: Path to the video file to sample
+    :param int max_frames: Maximum number of frames to sample across the video
+    :return: List of 64-bit integer hash values for sampled frames
+    :rtype: list[int]
     """
     cap = cv2.VideoCapture(file_path)
     if not cap.isOpened():
@@ -118,14 +123,24 @@ def sample_frame_hashes(file_path: str, max_frames: int = 15) -> List[int]:
 
 
 def hamming_distance(a: int, b: int) -> int:
-    """Calculate Hamming distance between two integers (number of differing bits)."""
+    """
+    Calculate Hamming distance between two integers (number of differing bits).
+    :param int a: First hash value to compare
+    :param int b: Second hash value to compare
+    :return: Number of differing bits between the two integers
+    :rtype: int
+    """
     return bin(a ^ b).count("1")
 
 
 def compare_video_hashes(hashes_a: List[int], hashes_b: List[int]) -> float:
     """
-    Compare two lists of video frame hashes and return a similarity score [0, 1].
+    Compare two lists of video frame hashes and return a similarity score in [0, 1].
     1.0 means identical, 0.0 means completely different.
+    :param List[int] hashes_a: Hash list for video A
+    :param List[int] hashes_b: Hash list for video B
+    :return: Similarity score between 0.0 and 1.0
+    :rtype: float
     """
     if not hashes_a or not hashes_b:
         return 0.0
@@ -223,6 +238,9 @@ async def upload_videos(files: list[UploadFile] = File(...)):
 async def list_videos(ratio: Optional[str] = Query(default=None, description="Canonical aspect ratio like 9:16, 1:1, 4:5, 16:9")):
     """
     List uploaded videos, optionally filtered by canonical aspect ratio bucket.
+    :param Optional[str] ratio: Canonical aspect ratio filter (i.e., 9:16, 1:1, 4:5, 16:9, Other)
+    :return: List of uploaded video metadata dictionaries
+    :rtype: list[dict]
     """
     values = list(videos.values())
     log.info(f"Listing videos with ratio: {ratio}")
@@ -237,13 +255,13 @@ async def list_videos(ratio: Optional[str] = Query(default=None, description="Ca
 
 
 @app.get("/match")
-async def match_videos(
-    video_id: str = Query(..., description="Video ID to match against other videos")
-):
+async def match_videos(video_id: str = Query(..., description="Video ID to match against other videos")):
     """
     Find videos with similar content to the given video_id.
-    Returns a list of similar videos with confidence scores.
     Uses perceptual hashing that's robust to overlays, aspect ratio, brightness, etc.
+    :param str video_id: Video ID to match against other uploaded videos
+    :return: List of similar videos with filename and confidence score
+    :rtype: list[dict]
     """
     if video_id not in frame_hash_dict:
         raise HTTPException(status_code=404, detail=f"Video with ID {video_id} not found")
@@ -276,6 +294,11 @@ async def match_videos(
 
 @app.get("/")
 async def root():
+    """
+    Root endpoint to give description
+    :return: Dictionary of description and endpoints
+    :rtype: dict
+    """
     log.info("Root endpoint called")
     return {
         "message": "Aspect Ratio Finder and Same Video Detector",
@@ -287,5 +310,5 @@ async def root():
     }
 
 if __name__ == "__main__":
-
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", access_log=True)
+
