@@ -100,25 +100,78 @@ def phash_gray(image_gray: np.ndarray) -> int:
     return int(bits)
 
 
-def _center_square_grayscale(frame: np.ndarray, output_size: int = 64) -> np.ndarray:
+def _detect_content_bbox(gray: np.ndarray) -> tuple[int, int, int, int]:
     """
-    Convert BGR frame to centered square grayscale, then resize.
-    Center-crop to a square to reduce aspect ratio effects, then scale.
-    :param np.ndarray frame: BGR frame
-    :param int output_size: Target size for both width/height
-    :return: Grayscale square image
-    :rtype: np.ndarray
+    Estimate content bounding box by removing low-texture side/top/bottom bars (black or blurred).
+    Uses gradient energy to find active columns/rows, robust to brightness.
+    Returns (y0, y1, x0, x1) inclusive-exclusive bounds.
+    """
+    h, w = gray.shape[:2]
+    if h < 8 or w < 8:
+        return 0, h, 0, w
+    # Gradient magnitude approximation
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    # Aggregate per column and row
+    col_energy = np.mean(mag, axis=0)
+    row_energy = np.mean(mag, axis=1)
+    # Normalize
+    col_max = float(np.max(col_energy)) or 1.0
+    row_max = float(np.max(row_energy)) or 1.0
+    col_norm = col_energy / col_max
+    row_norm = row_energy / row_max
+    # Threshold relative to max to keep active content; ignore quiet borders (black/blurred)
+    # Use a low threshold to keep real content even if low-contrast
+    col_thresh = 0.15
+    row_thresh = 0.15
+    active_cols = col_norm > col_thresh
+    active_rows = row_norm > row_thresh
+    # Find outermost active indices with a minimum interior size
+    def _active_bounds(active: np.ndarray, min_len: int) -> tuple[int, int]:
+        if not np.any(active):
+            return 0, len(active)
+        idx = np.where(active)[0]
+        start = int(idx[0])
+        end = int(idx[-1]) + 1
+        if end - start < min_len:
+            # Expand to minimum length centered
+            center = (start + end) // 2
+            half = min_len // 2
+            start = max(0, center - half)
+            end = min(len(active), start + min_len)
+            start = max(0, end - min_len)
+        return start, end
+    min_w = max(32, int(0.4 * w))
+    min_h = max(32, int(0.4 * h))
+    x0, x1 = _active_bounds(active_cols, min_w)
+    y0, y1 = _active_bounds(active_rows, min_h)
+    return y0, y1, x0, x1
+
+
+def _content_square_grayscale(frame: np.ndarray, output_size: int = 64) -> np.ndarray:
+    """
+    Convert BGR frame to grayscale, detect content bbox (removing bars/blur borders),
+    then take a centered square crop of the content region and resize to output_size.
     """
     if frame is None or frame.size == 0:
         return np.zeros((output_size, output_size), dtype=np.uint8)
-    h, w = frame.shape[:2]
-    side = min(h, w)
-    y0 = (h - side) // 2
-    x0 = (w - side) // 2
-    cropped = frame[y0:y0+side, x0:x0+side]
-    gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, (output_size, output_size), interpolation=cv2.INTER_AREA)
-    return gray
+    gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    y0, y1, x0, x1 = _detect_content_bbox(gray_full)
+    y0 = max(0, min(y0, gray_full.shape[0]))
+    y1 = max(y0 + 1, min(y1, gray_full.shape[0]))
+    x0 = max(0, min(x0, gray_full.shape[1]))
+    x1 = max(x0 + 1, min(x1, gray_full.shape[1]))
+    content = gray_full[y0:y1, x0:x1]
+    ch, cw = content.shape[:2]
+    side = min(ch, cw)
+    cy0 = (ch - side) // 2
+    cx0 = (cw - side) // 2
+    square = content[cy0:cy0+side, cx0:cx0+side]
+    if square.size == 0:
+        square = gray_full
+    square_resized = cv2.resize(square, (output_size, output_size), interpolation=cv2.INTER_AREA)
+    return square_resized
 
 
 def sample_frame_hashes(file_path: str, max_frames: int = 25) -> tuple[List[int], List[np.ndarray]]:
@@ -149,8 +202,8 @@ def sample_frame_hashes(file_path: str, max_frames: int = 25) -> tuple[List[int]
         ok, frame = cap.read()
         if not ok or frame is None:
             continue
-        # Use larger size for keypoint matching (128x128 for better feature detection)
-        gray_sq_large = _center_square_grayscale(frame, output_size=128)
+        # Use content-aware crop to remove bars/blur borders and focus on content
+        gray_sq_large = _content_square_grayscale(frame, output_size=128)
         # Use smaller size for hashing (64x64)
         gray_sq_small = cv2.resize(gray_sq_large, (64, 64), interpolation=cv2.INTER_AREA)
         
@@ -200,9 +253,10 @@ def compare_video_hashes(hashes_a: List[int], hashes_b: List[int]) -> float:
     if not dists_ab or not dists_ba:
         return 0.0
 
-    # Use a robust statistic (25th percentile) to reduce chance matches
-    perc_ab = float(np.percentile(dists_ab, 25))
-    perc_ba = float(np.percentile(dists_ba, 25))
+    # Use 20th percentile for balance: tolerant enough for overlays, strict enough to reject false positives
+    # Overlays can cause some frames to have higher distances, but true matches should still have many low-distance matches
+    perc_ab = float(np.percentile(dists_ab, 20))
+    perc_ba = float(np.percentile(dists_ba, 20))
     avg_distance = (perc_ab + perc_ba) / 2.0
     similarity = max(0.0, 1.0 - (avg_distance / 64.0))
     return similarity
@@ -211,7 +265,8 @@ def compare_video_hashes(hashes_a: List[int], hashes_b: List[int]) -> float:
 def compare_frames_keypoints(frames_a: List[np.ndarray], frames_b: List[np.ndarray]) -> float:
     """
     Compare two lists of frames using keypoint matching (ORB detector + BF matcher).
-    Returns a similarity score in [0, 1] based on good matches.
+    Uses geometric verification (homography/RANSAC) to filter overlay matches.
+    Returns a similarity score in [0, 1] based on geometrically consistent matches.
     :param List[np.ndarray] frames_a: List of grayscale frames from video A
     :param List[np.ndarray] frames_b: List of grayscale frames from video B
     :return: Similarity score between 0.0 and 1.0
@@ -220,8 +275,8 @@ def compare_frames_keypoints(frames_a: List[np.ndarray], frames_b: List[np.ndarr
     if not frames_a or not frames_b:
         return 0.0
     
-    # Initialize ORB detector (faster than SIFT/SURF, good for this use case)
-    orb = cv2.ORB_create(nfeatures=500)
+    # Initialize ORB detector (more features for better overlay tolerance)
+    orb = cv2.ORB_create(nfeatures=1000)
     # Brute force matcher with Hamming distance for ORB descriptors
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     
@@ -229,13 +284,28 @@ def compare_frames_keypoints(frames_a: List[np.ndarray], frames_b: List[np.ndarr
     
     # Compare each frame from A with all frames from B, take best match
     for frame_a in frames_a:
-        kp_a, desc_a = orb.detectAndCompute(frame_a, None)
+        h_a, w_a = frame_a.shape[:2]
+        # Create mask to ignore border regions (overlays often appear on edges)
+        # Keep central 80% of image
+        border_x = int(0.1 * w_a)
+        border_y = int(0.1 * h_a)
+        mask_a = np.zeros((h_a, w_a), dtype=np.uint8)
+        mask_a[border_y:h_a-border_y, border_x:w_a-border_x] = 255
+        
+        kp_a, desc_a = orb.detectAndCompute(frame_a, mask_a)
         if desc_a is None or len(kp_a) < 10:  # Need sufficient keypoints
             continue
         
         best_ratio = 0.0
         for frame_b in frames_b:
-            kp_b, desc_b = orb.detectAndCompute(frame_b, None)
+            h_b, w_b = frame_b.shape[:2]
+            # Similar mask for frame B
+            border_x_b = int(0.1 * w_b)
+            border_y_b = int(0.1 * h_b)
+            mask_b = np.zeros((h_b, w_b), dtype=np.uint8)
+            mask_b[border_y_b:h_b-border_y_b, border_x_b:w_b-border_x_b] = 255
+            
+            kp_b, desc_b = orb.detectAndCompute(frame_b, mask_b)
             if desc_b is None or len(kp_b) < 10:
                 continue
             
@@ -253,8 +323,27 @@ def compare_frames_keypoints(frames_a: List[np.ndarray], frames_b: List[np.ndarr
                     if m.distance < 0.75 * n.distance:  # Lowe's ratio test
                         good_matches.append(m)
             
-            # Calculate match ratio (good matches / total keypoints)
-            match_ratio = len(good_matches) / max(len(kp_a), 1)
+            if len(good_matches) < 10:
+                continue
+            
+            # Use geometric verification (homography with RANSAC) to filter overlay matches
+            # Overlay matches won't be geometrically consistent with content matches
+            src_pts = np.float32([kp_a[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp_b[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            
+            try:
+                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransacReprojThreshold=3.0)
+                if mask is not None:
+                    inlier_count = int(mask.sum())
+                    # Use inlier ratio instead of raw match ratio (filters overlay matches)
+                    match_ratio = inlier_count / max(len(kp_a), 1)
+                else:
+                    # Fallback to raw match ratio if homography fails
+                    match_ratio = len(good_matches) / max(len(kp_a), 1)
+            except cv2.error:
+                # Fallback to raw match ratio if homography fails
+                match_ratio = len(good_matches) / max(len(kp_a), 1)
+            
             best_ratio = max(best_ratio, match_ratio)
         
         if best_ratio > 0:
@@ -264,33 +353,34 @@ def compare_frames_keypoints(frames_a: List[np.ndarray], frames_b: List[np.ndarr
         return 0.0
     
     # Use median match ratio as similarity score, scale to [0, 1]
-    # For similar videos, we expect high match ratios (>0.2 for good matches)
-    # Use a more aggressive normalization to boost true matches above 0.85
+    # For similar videos with overlays, geometric verification ensures consistent matches
     median_ratio = float(np.median(all_match_ratios))
-    # Normalize: 0.2+ matches = high similarity, cap at 1.0
-    # This ensures true matches (with 0.2+ median ratio) score well
-    similarity = min(1.0, median_ratio / 0.2)
+    # Normalize: 0.15+ matches = high similarity (more tolerant for overlays)
+    # This ensures true matches (even with overlays) score well
+    similarity = min(1.0, median_ratio / 0.15)
     return similarity
 
 
-def compute_combined_similarity(hash_similarity: float, keypoint_similarity: float, hash_weight: float = 0.3, keypoint_weight: float = 0.7) -> float:
+def compute_combined_similarity(hash_similarity: float, keypoint_similarity: float, hash_weight: float = 0.4, keypoint_weight: float = 0.6) -> float:
     """
     Combine hash-based and keypoint-based similarity scores.
-    Keypoints are weighted more heavily (70%) as they're more discriminative.
-    Calibrated to ensure true matches score > 0.85.
+    Keypoints are weighted more heavily (60%) as they're more discriminative.
+    Calibrated to ensure true matches (even with overlays) score > 0.85.
     :param float hash_similarity: Similarity from perceptual hashing [0, 1]
     :param float keypoint_similarity: Similarity from keypoint matching [0, 1]
-    :param float hash_weight: Weight for hash similarity (default 0.3)
-    :param float keypoint_weight: Weight for keypoint similarity (default 0.7)
+    :param float hash_weight: Weight for hash similarity (default 0.4)
+    :param float keypoint_weight: Weight for keypoint similarity (default 0.6)
     :return: Combined similarity score [0, 1]
     :rtype: float
     """
     total_weight = hash_weight + keypoint_weight
     combined = (hash_similarity * hash_weight + keypoint_similarity * keypoint_weight) / total_weight
-    # Boost combined score for true matches
-    # If both scores are decent, boost the result to ensure >0.85 for matches
-    if hash_similarity > 0.6 and keypoint_similarity > 0.5:
-        combined = min(1.0, combined * 1.1)  # 10% boost for strong matches
+    # Boost combined score for true matches (overlays may reduce individual scores slightly)
+    # More tolerant thresholds for overlay scenarios
+    if hash_similarity > 0.55 and keypoint_similarity > 0.45:
+        combined = min(1.0, combined * 1.15)  # 15% boost for moderate-strong matches (handles overlays)
+    elif hash_similarity > 0.50 and keypoint_similarity > 0.40:
+        combined = min(1.0, combined * 1.08)  # 8% boost for lower scores that might be overlay cases
     return max(0.0, min(1.0, combined))
 
 
@@ -418,7 +508,7 @@ async def match_videos(video_id: str = Query(..., description="Video ID to match
         if video_id_check == video_id:
             continue
         
-        hash_similarity = compare_video_hashes(target_hashes, video_hashes)
+        hash_similarity = max(compare_video_hashes(target_hashes, video_hashes), compare_video_hashes(video_hashes, target_hashes))
         
         # Lower threshold for stage 1 (catch more candidates for stage 2 verification)
         # Need to be more permissive here to catch all potential matches
@@ -438,15 +528,14 @@ async def match_videos(video_id: str = Query(..., description="Video ID to match
         
         if target_thumbnails and candidate_thumbnails:
             # Perform keypoint matching
-            keypoint_sim = compare_frames_keypoints(target_thumbnails, candidate_thumbnails)
+            keypoint_sim = max(compare_frames_keypoints(target_thumbnails, candidate_thumbnails), compare_frames_keypoints(candidate_thumbnails, target_thumbnails))
             # Combine both similarity scores
             combined_similarity = compute_combined_similarity(hash_sim, keypoint_sim)
         else:
             # Fallback to hash-only if thumbnails unavailable
             combined_similarity = hash_sim * 0.85  # Slight penalty for no keypoint check
         
-        # Final threshold: require >0.85 for true matches (same video, different aspect ratio)
-        if combined_similarity > 0.85:
+        if combined_similarity > 0.8:
             similar_videos.append({
                 "video_id": video_id_check,
                 "filename": videos[video_id_check]["filename"],
