@@ -34,14 +34,17 @@ curl https://aspect-ratio-finder-and-same-video.onrender.com/match?video_id=6404
 ```
 Example Response
 ```json
-[{"video_id":"00607680","filename":"test2.mp4","confidence":0.6573},{"video_id":"07602535","filename":"test3.mp4","confidence":0.6219}]
+[{"video_id":"80821672","filename":"test2.mp4","confidence":1.0},{"video_id":"51926797","filename":"test3_overlay.mp4","confidence":0.9642},{"video_id":"72660832","filename":"test3.mp4","confidence":0.9627}]
 ```
 
 ### Design Notes
-- Content Similarity: The service computes 64-bit dHash values on evenly sampled grayscale frames across the video, then compares sets of hashes with a Hamming-distance–based similarity score in [0, 1]. We return the videos that have a similarity rating greater than 0.6, sorted most to least similar. 0.6 was decided after testing a couple videos so a different value may be more robust.
+- Content Similarity: The service uses a two-stage matching algorithm for robust video similarity detection:
+  1. **Stage 1 (Hash-based filtering)**: Computes 64-bit pHash (DCT-based perceptual hash) values on up to 25 evenly sampled frames per video. Frames are center-cropped to square format and resized to reduce aspect ratio sensitivity. Videos with hash similarity > 0.50 proceed to stage 2.
+  2. **Stage 2 (Keypoint matching)**: Uses ORB (Oriented FAST and Rotated BRIEF) keypoint detection and matching on frame thumbnails (128×128 pixels) to verify matches. Keypoint matching is more discriminative and helps distinguish true matches from false positives.
+  3. **Combined scoring**: Final similarity combines hash similarity (30% weight) and keypoint similarity (70% weight). True matches (same video, different aspect ratio) should score > 0.85.
 
 - Aspect Ratio Bucketing: Videos are placed into canonical buckets 9:16, 1:1, 4:5, 16:9 within 1% tolerance. If the video does not fit in any bucket then they are placed in `Other`
 
-- In-memory state: Uploaded video metadata and frame hashes for checking similar content are stored in-memory (`videos`, `frame_hash_dict`) so restarts will clear state. In order to process video metadata, uploads are written to temporary files which may take more than a minute depending on internet speed.
+- In-memory state: Uploaded video metadata, frame hashes, and frame thumbnails for similarity detection are stored in-memory (`videos`, `frame_hash_dict`, `frame_thumbnails_dict`) so restarts will clear state. In order to process video metadata, uploads are written to temporary files which may take more than a minute depending on internet speed.
 
-- Limits: Only `.mp4` is accepted. Very long videos will probably mean fewer sampled frames compared to total video causing similarity to be lower.
+- Limits: Only `.mp4` is accepted. Videos are sampled at up to 25 frames evenly distributed across the video duration for similarity comparison.
