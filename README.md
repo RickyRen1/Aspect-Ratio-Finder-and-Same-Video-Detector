@@ -38,10 +38,10 @@ Example Response
 ```
 
 ### Design Notes
-- Content Similarity: The service uses a two-stage matching algorithm for robust video similarity detection:
-  1. **Stage 1 (Hash-based filtering)**: Computes 64-bit pHash (DCT-based perceptual hash) values on up to 25 evenly sampled frames per video. Frames are center-cropped to square format and resized to reduce aspect ratio sensitivity. Videos with hash similarity > 0.50 proceed to stage 2.
-  2. **Stage 2 (Keypoint matching)**: Uses ORB (Oriented FAST and Rotated BRIEF) keypoint detection and matching on frame thumbnails (128×128 pixels) to verify matches. Keypoint matching is more discriminative and helps distinguish true matches from false positives.
-  3. **Combined scoring**: Final similarity combines hash similarity (30% weight) and keypoint similarity (70% weight). True matches (same video, different aspect ratio) should score > 0.85.
+- Content Similarity: The service uses a two-stage matching algorithm for robust video similarity detection that handles aspect ratio changes, blurred/black bars, and overlays:
+  1. **Stage 1 (Hash-based filtering)**: Computes 64-bit pHash (DCT-based perceptual hash) values on up to 25 evenly sampled frames per video. Frames use content-aware cropping that detects and removes black/blurred borders, then extracts a centered square crop of the actual content. This makes the algorithm robust to different aspect ratios with letterboxing. Videos with hash similarity > 0.50 (using 20th percentile for overlay tolerance) proceed to stage 2.
+  2. **Stage 2 (Keypoint matching)**: Uses ORB (Oriented FAST and Rotated BRIEF) keypoint detection (1000 features) on frame thumbnails (128×128 pixels) with border masking (central 80% to ignore edge overlays). Applies geometric verification using homography with RANSAC to filter overlay matches that aren't geometrically consistent with content. For borderline cases, performs bidirectional matching to account for keypoint count differences. Keypoint matching helps distinguish true matches from false positives and handles overlays effectively.
+  3. **Combined scoring**: Final similarity combines hash similarity (40% weight) and keypoint similarity (60% weight). Videos with combined similarity > 0.80 are considered matches. The algorithm is calibrated to handle same content with different aspect ratios, blurred borders, and overlays.
 
 - Aspect Ratio Bucketing: Videos are placed into canonical buckets 9:16, 1:1, 4:5, 16:9 within 1% tolerance. If the video does not fit in any bucket then they are placed in `Other`
 
