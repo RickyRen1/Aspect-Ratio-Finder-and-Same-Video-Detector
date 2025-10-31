@@ -491,6 +491,7 @@ async def match_videos(video_id: str = Query(..., description="Video ID to match
     :return: List of similar videos with filename and confidence score
     :rtype: list[dict]
     """
+    target_confidence = 0.8 # Threshold for the target video to be considered similar
     if video_id not in frame_hash_dict:
         raise HTTPException(status_code=404, detail=f"Video with ID {video_id} not found")
     
@@ -508,7 +509,7 @@ async def match_videos(video_id: str = Query(..., description="Video ID to match
         if video_id_check == video_id:
             continue
         
-        hash_similarity = max(compare_video_hashes(target_hashes, video_hashes), compare_video_hashes(video_hashes, target_hashes))
+        hash_similarity = compare_video_hashes(target_hashes, video_hashes)
         
         # Lower threshold for stage 1 (catch more candidates for stage 2 verification)
         # Need to be more permissive here to catch all potential matches
@@ -528,14 +529,19 @@ async def match_videos(video_id: str = Query(..., description="Video ID to match
         
         if target_thumbnails and candidate_thumbnails:
             # Perform keypoint matching
-            keypoint_sim = max(compare_frames_keypoints(target_thumbnails, candidate_thumbnails), compare_frames_keypoints(candidate_thumbnails, target_thumbnails))
-            # Combine both similarity scores
+            keypoint_sim = compare_frames_keypoints(target_thumbnails, candidate_thumbnails)
+
+            # If the keypoint similarity is between 0 and target_confidence, check the reversed keypoint similarity
+            # to see if the number of keypoints affects the similarity score
+            if keypoint_sim > 0.0 and keypoint_sim < target_confidence:
+                keypoint_sim = max(keypoint_sim, compare_frames_keypoints(candidate_thumbnails, target_thumbnails))
+            # Combine hash and keypoint similarity scores
             combined_similarity = compute_combined_similarity(hash_sim, keypoint_sim)
         else:
             # Fallback to hash-only if thumbnails unavailable
-            combined_similarity = hash_sim * 0.85  # Slight penalty for no keypoint check
+            combined_similarity = hash_sim * (target_confidence + 0.05)  # Slight penalty for no keypoint check
         
-        if combined_similarity > 0.8:
+        if combined_similarity > target_confidence:
             similar_videos.append({
                 "video_id": video_id_check,
                 "filename": videos[video_id_check]["filename"],
